@@ -3,3 +3,5 @@ __pycache__/
 *.png
 DQN_Tutorial.py
 Torchtest.py
+runs/
+MEC_Phase2 copy.py
