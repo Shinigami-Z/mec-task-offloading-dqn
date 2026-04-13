@@ -4,5 +4,4 @@ __pycache__/
 DQN_Tutorial.py
 Torchtest.py
 runs/
-MEC_Phase2 copy.py
-MEC_Phase2 copy 2.py
+MEC_Phase2*.py
