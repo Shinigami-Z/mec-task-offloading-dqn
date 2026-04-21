@@ -1,353 +1,301 @@
-# DQN for Task Offloading in MEC — Energy, Delay & Privacy
+# MEC DQN Offloading — with Federated Learning
 
-A Deep Q-Network that learns an energy-efficient, privacy-aware task offloading
-policy in a Mobile Edge Computing (MEC) system. At each time slot the agent
-decides **where** to run a task (local device / edge server / cloud) and
-**how much CPU** to allocate, trading off energy, deadline violations, and
-privacy leakage.
+DQN-based task offloading for Mobile Edge Computing, extended with **Federated
+Learning (FedAvg)** so multiple mobile devices can train collaboratively
+without ever uploading their raw task history.
 
-> Phase 2 implementation — includes user mobility, dynamic uplink rate,
-> migration cost, and a simplified privacy penalty on top of the base
-> Phase 1 DQN pipeline.
-
-**Made by Yousif Iskander.**
+> CSCI4052U — Neural Computation
+> Made by Yousif Iskander
 
 ---
 
-## Table of Contents
+## What it does
 
-1. [What this project does](#what-this-project-does)
-2. [The model](#the-model)
-3. [Installation](#installation)
-4. [Running it](#running-it)
-5. [Menu options](#menu-options)
-6. [Output structure](#output-structure)
-7. [TensorBoard](#tensorboard)
-8. [Configuration reference](#configuration-reference)
-9. [Code map](#code-map)
-10. [Tips & troubleshooting](#tips--troubleshooting)
+At each timestep a device gets a task `(i_t, c_t, d_t)` — input size, required
+CPU cycles, deadline — and must pick **where to run it** and **how much CPU to
+allocate**. The action space is:
 
----
+- 3 execution locations: **Local**, **Cloud**, **MEC** (mobile edge server)
+- 3 CPU ratios: **0.25**, **0.5**, **1.0**
+- Total: **9 discrete actions**
 
-## What this project does
-
-The agent is placed in a simulated MEC environment. Every time step:
-
-1. A new task arrives with random input size, CPU cycles, and deadline.
-2. The agent picks one of **9 actions** = 3 execution locations × 3 CPU ratios:
-   - `Local` / `Cloud` / `MEC (Edge)`
-   - CPU ratio: `0.25`, `0.5`, `1.0`
-3. The environment computes delay, energy, privacy penalty, and migration
-   cost (if the agent switched between remote servers).
-4. The agent gets a negative reward proportional to total cost.
-5. The user's position drifts, which changes the wireless uplink rate to the
-   MEC server, so the optimal action shifts over time.
-
-Over many episodes, the DQN learns a policy that balances these costs.
-
----
-
-## The model
-
-### State (5-dim, normalized)
+The agent is rewarded for minimizing energy, meeting deadlines, and preserving
+privacy:
 
 ```
-s_t = [ i(t)/1e7,     # input data size, bits
-        c(t)/1e9,     # required CPU cycles
-        d(t),         # deadline, seconds
-        R_e(t)/1e8,   # current uplink bitrate (mobility-dependent)
-        a_{t-1}/|A| ] # previous action (helps with migration awareness)
+R = −( E_t  +  λ · max(0, T_t − d_t)  +  privacy_cost ) / reward_scale
 ```
 
-### Action space (9 discrete actions)
+where `privacy_cost` is `0.0 / 0.3 / 0.6` for Local / Cloud / MEC respectively
+(MEC reveals more location info than the cloud).
 
-| idx | location | ρ (CPU ratio) |
-|-----|----------|---------------|
-| 0–2 | Local    | 0.25 / 0.5 / 1.0 |
-| 3–5 | Cloud    | 0.25 / 0.5 / 1.0 |
-| 6–8 | MEC      | 0.25 / 0.5 / 1.0 |
+This project covers **two training modes**:
 
-### Reward
+| Mode           | Devices | Privacy                                    | Use case                          |
+|---------------:|:-------:|:-------------------------------------------|:----------------------------------|
+| Single-agent   | 1       | Inference-time only (privacy term `R(t)`) | Baseline — one user, one policy   |
+| **Federated**  | N       | **Inference + training-time**              | N users share a policy, data stays local |
 
-```
-r_t = -( E(t) + λ · max(0, T(t) − d(t)) + R(t) ) / reward_scale
-```
-
-where:
-- `E(t)` = energy (J), including migration energy if the agent switched MEC↔Cloud
-- `T(t)` = total delay (s), including transmission + compute + migration
-- `R(t)` = privacy penalty: 0 local, 0.3 cloud, 0.6 MEC
-- `λ` = deadline-violation weight (default 5.0)
-- `reward_scale` = divisor to keep rewards well-conditioned (default 1000)
-
-### Network
-
-A 3-layer MLP: `5 → 256 → 256 → 9`, ReLU activations, SmoothL1Loss,
-AdamW optimizer with target network soft-updates (Polyak averaging, τ=0.001).
+The two privacy layers are complementary. `R(t)` stops the **deployed** agent
+from leaking location via its choices. FL stops the **training process** from
+ever collecting a central dataset of users' tasks.
 
 ---
 
 ## Installation
 
 ```bash
-# Python 3.9+ recommended
 pip install torch numpy matplotlib tqdm tensorboard
 ```
 
-GPU is auto-detected. No GPU? It falls back to CPU without any changes.
+Tested on CPU and CUDA. No GPU required — the default config finishes in a few
+minutes on CPU for baseline runs.
 
----
-
-## Running it
+## Quickstart
 
 ```bash
-python train.py
+python3 trainer.py
 ```
 
-You'll land in a menu. Pick an option and it'll prompt for any extra info
-(repeats, seed, etc.). Everything gets saved under `runs/`.
-
----
-
-## Menu options
+You'll see the menu:
 
 ```
 ╔════════════════════════════════════════════════════════════╗
-║               MEC DQN Offloading — Trainer                 ║
+║                MEC DQN Offloading — Trainer                ║
 ╠════════════════════════════════════════════════════════════╣
-║  [1] Run ALL configs (full comparison)                     ║
-║  [2] fast_decay  only                                      ║
-║  [3] slow_decay  only                                      ║
-║  [4] persistent  only                                      ║
-║  [5] Custom run                                            ║
-║  [6] Math sanity check                                     ║
-║  [7] Launch TensorBoard (view runs in browser)             ║
-║  [8] Quit                                                  ║
+║  Single-Agent DQN:                                         ║
+║    [1]  Run ALL configs (full comparison)                  ║
+║    [2]  fast_decay  only                                   ║
+║    [3]  slow_decay  only                                   ║
+║    [4]  persistent  only                                   ║
+║    [5]  Custom run                                         ║
+║                                                            ║
+║  Federated Learning:                                       ║
+║    [F1] Quick FL run (3 clients, 10 rounds)                ║
+║    [F2] Standard FL run (5 clients, 50 rounds)             ║
+║    [F3] Custom FL run                                      ║
+║                                                            ║
+║  Utilities:                                                ║
+║    [6]  Math sanity check                                  ║
+║    [7]  Launch TensorBoard                                 ║
+║    [8]  Delete ALL runs                                    ║
+║    [9]  Quit                                               ║
 ╚════════════════════════════════════════════════════════════╝
 ```
 
-**[1] Run all configs** — trains all three exploration schedules in sequence.
-Great for producing the comparison plot.
+### Menu options
 
-**[2–4] Single config** — trains just one. Asks how many repeats you want
-(each repeat uses a different seed, auto-incremented from your base seed).
-
-**[5] Custom run** — interactive wizard that lets you override any
-hyperparameter (episodes, batch size, LR, γ, τ, λ, reward scale, privacy
-weights, migration cost…). Shows a confirmation summary before starting.
-
-**[6] Math sanity check** — runs every action on a fixed synthetic state
-and prints the delay/energy/reward breakdown. Use this to verify the physics
-math by eye before a long training run.
-
-**[7] TensorBoard** — spawns `tensorboard --logdir runs/` in the background,
-opens your browser. Non-blocking — you can go right back to the menu.
-
-**[8] Quit** — also accepts `q`, `quit`, `exit`.
-
-### Exploration schedules
-
-| Name | ε_start | ε_end | ε_decay | Behavior |
-|------|---------|-------|---------|----------|
-| `fast_decay` | 1.0 | 0.05 | 2000  | exploration dies fast — aggressive exploit |
-| `slow_decay` | 1.0 | 0.05 | 15000 | smooth long decay — balanced |
-| `persistent` | 1.0 | 0.15 | 15000 | slow decay with high floor — never stops exploring |
+| Key  | What it does |
+|------|--------------|
+| `1`  | Run **all three** baseline configs (`fast_decay`, `slow_decay`, `persistent`) with chosen seed/repeats. Produces a side-by-side comparison plot. |
+| `2–4`| Run a single named baseline config. |
+| `5`  | Custom baseline — wizard prompts for every hyperparameter. |
+| `F1` | **Quick FL run** — 3 clients × 10 rounds × 5 local episodes. Smoke test, ~1 min. |
+| `F2` | **Standard FL run** — 5 clients × 50 rounds × 20 local episodes. The headline experiment. |
+| `F3` | **Custom FL run** — wizard for `n_clients`, `n_rounds`, IID/non-IID, ε schedule, etc. |
+| `6`  | Print reward/energy/delay for every action on a fixed state. Useful for checking reward scaling. |
+| `7`  | Launch TensorBoard pointed at `runs/`. |
+| `8`  | Nuke the `runs/` directory (asks for `DELETE` confirmation). |
+| `9`  | Quit. |
 
 ---
 
-## Output structure
-
-Every run writes to its own directory under `runs/`:
+## Project structure
 
 ```
-runs/
-├── latest → fast_decay-Run(3)/       # symlink to most recent run
-├── fast_decay/
-│   ├── config.yaml         # every hyperparameter used, plus results summary
-│   ├── metrics.npz         # raw numpy arrays (rewards, energy, delay, …)
-│   ├── dashboard.png       # 6-panel training dashboard
-│   ├── best_model.pt       # weights with highest eval reward
-│   ├── checkpoint.pt       # resumable full state (every 200 eps)
-│   └── events.out.tfevents.*  # TensorBoard logs
-├── slow_decay/…
-├── persistent/…
-├── comparison_1712952841.png   # cross-config mean ± std plot
-└── summary.md                  # markdown table of all runs
+trainer.py              ← Everything. Single entry point.
+README.md               ← This file.
+runs/                   ← Auto-created. All outputs live here.
+  ├─ fast_decay/
+  │   └─ Run(1)/
+  │       ├─ config.yaml         ← Every hyperparameter for this run
+  │       ├─ dashboard.png       ← 6-panel training dashboard
+  │       ├─ metrics.npz         ← Raw episode-level metrics
+  │       ├─ best_model.pt       ← Best eval-reward checkpoint
+  │       ├─ checkpoint.pt       ← Resumable state every 200 eps
+  │       └─ events.out.tfevents.*  (TensorBoard)
+  ├─ slow_decay/Run(1)/
+  ├─ persistent/Run(1)/
+  ├─ fl_standard/
+  │   └─ Run(1)/
+  │       ├─ config.yaml            ← FL-mode config + per-client profiles
+  │       ├─ fl_dashboard.png       ← 6-panel FL dashboard
+  │       ├─ fl_metrics.npz         ← Round-level + eval metrics
+  │       ├─ best_global_model.pt   ← Best aggregated global model
+  │       └─ events.out.tfevents.*
+  ├─ comparison_<ts>.png     ← Cross-config comparison (baseline menu [1])
+  ├─ summary.md              ← Markdown results table
+  └─ latest → <most recent run>   (symlink)
 ```
 
-### `config.yaml` — what was used + what happened
+### Output files explained
 
-Auto-generated at run start with every param, then appended with results
-when training finishes:
-
-```yaml
-meta:
-  config_name: "slow_decay"
-  seed: 0
-exploration:
-  eps_start: 1
-  eps_end: 0.05
-  eps_decay: 15000
-training:
-  num_episodes: 1000
-  batch_size: 128
-  lr: 5.000e-05
-  gamma: 0.99
-  tau: 0.001
-environment:
-  lam: 5
-  reward_scale: 1000
-  r_mec: 0.6
-  r_cloud: 0.3
-
-results:
-  elapsed_sec: 251.43
-  elapsed_human: "0:04:11"
-  final_reward_mean_last50: -0.07214
-  final_violation_rate_last50: 0.08420
-  best_eval_reward: -0.06811
-```
-
-### `dashboard.png` — 6-panel summary
-
-| Panel | What it shows |
-|-------|---------------|
-| Reward | Training reward (20-ep mean ± σ band) + eval reward (orange dots) |
-| Violation Rate | % of steps that missed their deadline |
-| Action Distribution | Stacked area of Local/Cloud/MEC usage over time |
-| Energy | Avg mJ per step |
-| Delay | Avg seconds per step, vs. 1.0s deadline reference line |
-| ε | Exploration schedule actually followed |
-
-### `summary.md` — batch table
-
-After a batch of runs finishes, you get:
-
-```
-| config      | seed | final_R  | viol% | E(mJ) | best_eval | time    |
-|-------------|------|----------|-------|-------|-----------|---------|
-| fast_decay  | 0    | -0.0821  | 11.8  | 1.42  | -0.0711   | 0:04:12 |
-| slow_decay  | 0    | -0.0722  |  8.4  | 1.21  | -0.0681   | 0:04:15 |
-| persistent  | 0    | -0.0755  |  9.1  | 1.28  | -0.0702   | 0:04:18 |
-```
-
-Paste-ready for a report.
+- **`config.yaml`** — complete hyperparameter dump + final results. Everything
+  needed to reproduce or write up a run.
+- **`dashboard.png` / `fl_dashboard.png`** — training curves, violation rate,
+  action distribution, energy, delay, ε schedule (baseline) or per-client
+  curves + global eval + heterogeneity (FL).
+- **`metrics.npz`** — raw arrays (`rewards`, `energy`, `delay`,
+  `violation_rate`, `action_dist`, `eps`). Load with `np.load(...)`.
+- **`best_model.pt`** — the DQN checkpoint with the best greedy-eval reward.
+  For FL runs this is `best_global_model.pt` (the aggregated server model).
+- **TensorBoard logs** — everything above, streamed live. Launch with menu [7].
 
 ---
 
-## TensorBoard
+## File structure inside `trainer.py`
 
-Hit **[7]** in the menu, or run manually:
+Everything lives in **one file** organized into numbered sections:
 
-```bash
-tensorboard --logdir runs/
+| Section | Purpose |
+|--------:|---------|
+| 1 | Utilities (seed, colored tqdm, run-dir management, TB launcher) |
+| 2 | `MECOffloadingEnv` + `HeterogeneousMECEnv` — the env + non-IID variant |
+| 3 | `DQN` network, `Transition`, `ReplayMemory` |
+| 4 | Default hyperparameters + smoothing helpers |
+| 5 | `math_sanity_check()` |
+| 6 | `run_eval()` — shared greedy evaluator |
+| 7 | **`FederatedClient`** + **`federated_average()`** |
+| 8 | Menu/input wizards (`custom_run_config`, `custom_fl_config`) |
+| 9 | `run_training()` — single-agent loop |
+| 10 | **`run_federated_training()`** + `_make_fl_dashboard()` |
+| 11 | Cross-run comparison plots + markdown summary |
+| 12 | `CONFIGS`, `FL_PRESETS`, main menu loop |
+
+---
+
+## How Federated Learning works here
+
+### The setup
+
+Each FL client is a complete DQN agent:
+
+- Its own `HeterogeneousMECEnv` (possibly with different task sizes, mobility,
+  privacy weights — this is the non-IID part)
+- Its own `policy_net`, `target_net`, optimizer, replay buffer
+- Its own ε-greedy counter that persists across rounds
+
+A **single global model** lives on the server. Clients never see each other's
+data — only the global model weights.
+
+### One FL round
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│ Step 1: Server broadcasts global weights → selected clients   │
+│ Step 2: Each client does `local_episodes` episodes of DQN     │
+│         training on its own env. Replay buffer stays local.   │
+│ Step 3: Clients upload only policy_net weights                │
+│ Step 4: Server computes weighted FedAvg:                      │
+│                                                                │
+│                     w_global = Σ_k (n_k / N) · w_k            │
+│                                                                │
+│         where n_k = transitions collected by client k         │
+│         and   N   = total transitions this round              │
+│ Step 5: Global model evaluated on held-out env (greedy)       │
+└───────────────────────────────────────────────────────────────┘
 ```
 
-**Scalars you get:**
-- `reward/episode`, `reward/mean_50`
-- `env/violation_rate`, `env/energy_mJ`, `env/delay_s`
-- `eval/reward`, `eval/violation_rate`, `eval/energy_mJ` (greedy eval, every 50 eps)
-- `train/loss`, `train/grad_norm`, `train/eps`
-- `action_dist` (grouped: local / cloud / mec fractions on one chart)
+### Design decisions worth mentioning in the writeup
 
-TensorBoard makes multi-run comparison trivial — just toggle which runs
-you want overlaid in the left sidebar.
+- **Weighted FedAvg** (McMahan et al.) — clients with more experience pull
+  harder. Important here because under non-IID settings some clients collect
+  more transitions per round than others.
+- **Target net resynced to global weights** after each broadcast. Without
+  this, the client has a stale target net from before aggregation, and the TD
+  error spikes dramatically. Easy bug to miss.
+- **ε counter persists across rounds** — so exploration decays smoothly over
+  the whole run, not per-round.
+- **Replay buffers never leave clients** — this is the whole privacy point.
+  Only weights cross the wire.
+- **Held-out eval env uses default parameters** — matches no single client.
+  This tests whether the aggregated policy **generalizes**, not whether it
+  memorized one client's distribution.
+
+### Non-IID client profiles
+
+When `heterogeneous=True` (default), each client gets a random profile:
+
+| Parameter      | Range          | What it does                              |
+|----------------|----------------|-------------------------------------------|
+| `task_scale`   | [0.6, 1.4]     | Multiplies input size & CPU demand        |
+| `max_speed`    | [2.0, 8.0] m/s | Faster = noisier uplink rate              |
+| `r_mec`        | [0.3, 0.9]     | Client's sensitivity to MEC privacy cost  |
+| `r_cloud`      | [0.1, 0.4]     | Client's sensitivity to Cloud privacy cost|
+
+The profiles are printed to console at the start of every FL run and saved
+into `config.yaml`.
 
 ---
 
 ## Configuration reference
 
-All defaults live at the top of `train.py`:
+### Shared DQN hyperparameters
 
-```python
-BATCH_SIZE = 128
-GAMMA = 0.99
-TAU = 0.001
-LR = 5e-5
-NUM_EPISODES = 1000
-REPLAY_CAPACITY = 100000
-EVAL_EVERY = 50          # eval cadence (episodes)
-EVAL_EPISODES = 10       # greedy episodes per eval
-CHECKPOINT_EVERY = 200   # resumable snapshot cadence
-```
+| Param           | Default | Notes                                         |
+|-----------------|---------|-----------------------------------------------|
+| `BATCH_SIZE`    | 128     | Replay minibatch                              |
+| `GAMMA`         | 0.99    | Discount                                      |
+| `TAU`           | 0.005   | Soft target update                            |
+| `LR`            | 5e-5    | AdamW learning rate                           |
+| `REPLAY_CAPACITY` | 100000 | Per-client in FL mode                        |
+| `TRAIN_FREQ`    | 4       | Optimize every N env steps                    |
+| `EVAL_EVERY`    | 50      | Episodes between greedy evals (single-agent)  |
 
-Environment parameters live inside `MECOffloadingEnv.__init__` and map
-directly to the project spec (`f_l`, `f_e`, `f_c`, `P_tx`, `T_bh`, `b_bh`,
-`ζ`, `e_e`, `e_c`, `P_bh`, privacy weights, migration cost, etc.).
+### Single-agent presets (`CONFIGS`)
 
-Any of these can be overridden per-run through the **Custom** menu without
-touching the source.
+| Name         | ε_start | ε_end | decay | Notes                           |
+|--------------|---------|-------|-------|---------------------------------|
+| `fast_decay` | 1.0     | 0.05  | 2000  | Exploration dies fast           |
+| `slow_decay` | 1.0     | 0.05  | 15000 | Smooth long decay (recommended) |
+| `persistent` | 1.0     | 0.15  | 15000 | Slow decay + high ε floor       |
 
----
+### FL presets (`FL_PRESETS`)
 
-## Code map
+| Name          | clients | rounds | local_eps | decay  | Purpose       |
+|---------------|---------|--------|-----------|--------|---------------|
+| `fl_quick`    | 3       | 10     | 5         | 2000   | Smoke test    |
+| `fl_standard` | 5       | 50     | 20        | 15000  | Main FL run. Matches `slow_decay` schedule for direct comparison with single-agent. |
 
-| Section | Purpose |
-|---------|---------|
-| `set_seed` | Reproducibility — seeds `random`, `numpy`, `torch` (incl. CUDA) |
-| `MECOffloadingEnv` | The environment: physics, mobility, reward |
-| `DQN` | 3-layer MLP, 256 hidden units |
-| `ReplayMemory` | Vanilla uniform-sampling replay buffer (deque-backed) |
-| `run_eval` | Greedy-policy evaluation — ε=0 for N episodes |
-| `math_sanity_check` | Prints per-action delay/energy/reward on a fixed state |
-| `run_training` | One full training run (core loop + logging + plots) |
-| `aggregate_comparison_plot` | Groups repeats by config, plots mean±std |
-| `write_summary_md` | Post-batch markdown summary table |
-| `launch_tensorboard` | Non-blocking TensorBoard launcher with browser-open |
-| `__main__` loop | Menu dispatch, run queue, batch ETA |
+### FL-specific parameters
 
-### Key design choices
-
-- **Normalized state** — inputs to the network are all O(1)-scale to keep
-  the optimizer well-conditioned; physics is un-normalized inside `step()`.
-- **Reward scaling** — dividing by 1000 keeps reward around O(0.1), which
-  plays nicely with SmoothL1 loss and the default Adam learning rate.
-- **In-place soft update** — `tp.data.mul_(1-τ).add_(p.data, α=τ)` instead
-  of the state-dict copy loop. Runs every step, so the speedup adds up.
-- **Separate eval env** — so eval doesn't perturb the training env's
-  mobility state or RNG stream.
-- **Unique run dirs** — `name`, `name-Run(1)`, `name-Run(2)`… so repeats
-  never clobber each other.
+| Param             | Default | Notes                                                          |
+|-------------------|---------|----------------------------------------------------------------|
+| `n_clients`       | 5       | Number of simulated mobile devices                             |
+| `n_rounds`        | 50      | FedAvg aggregation rounds                                      |
+| `local_episodes`  | 20      | Episodes each client trains per round                          |
+| `client_fraction` | 1.0     | Fraction of clients sampled per round (1.0 = all)              |
+| `heterogeneous`   | True    | Non-IID client profiles. Set False for an IID control run.     |
 
 ---
 
-## Tips & troubleshooting
+## Suggested experiments for the writeup
 
-**"Rewards plateau at a weird value"** — check your reward scale. If
-`-0.05` feels like a ceiling, try `reward_scale=100` so gradients are larger.
+1. **Baseline vs FL at matched env steps.** Single-agent trains on
+   ~50 000 steps (1000 eps × 50); FL-standard trains on 5 clients ×
+   50 rounds × 20 eps × 50 steps = 250 000 total env steps, but those are
+   split across 5 agents. Report reward / violation rate / energy side-by-side.
 
-**"Violation rate never drops"** — λ might be too low. Try `λ=10` or `20`
-in the Custom menu. Also check the math sanity output (menu [6]) to
-confirm the deadline-breaching actions do get penalized more.
+2. **IID vs non-IID FL.** Run `F3` twice with `heterogeneous=1` and
+   `heterogeneous=0`, holding everything else equal. Non-IID typically
+   converges slower and to a slightly worse global optimum — this is the
+   well-known FedAvg weakness and worth showing.
 
-**"Action distribution collapses to all-local immediately"** — exploration
-died too fast. Use `slow_decay` or `persistent`, or bump `EPS_DECAY` higher
-in a custom run.
+3. **Client-count sweep.** Run `F3` with `n_clients ∈ {2, 5, 10}` keeping
+   total env steps roughly constant. Shows communication-vs-sample tradeoff.
 
-**"TensorBoard launch fails"** — install it (`pip install tensorboard`)
-and confirm `tensorboard` is on your PATH. You can also run the command
-manually in a second terminal.
-
-**"Loss explodes / NaN"** — check `train/grad_norm` in TensorBoard. If it
-spikes, lower the LR or reduce `tau` so the target net moves more slowly.
-
-**"`runs/latest` symlink didn't update on Windows"** — symlinks need
-admin on older Windows. Harmless — everything else still works; you just
-have to cd into the timestamped dir manually.
-
-**"I want to resume a crashed run"** — `checkpoint.pt` has everything you
-need (policy net, target net, optimizer state, steps_done). Resume logic
-isn't wired into the menu yet, but the data is there.
+4. **Partial participation.** Set `client_fraction < 1.0` (e.g. 0.5) to
+   simulate realistic networks where not every device is reachable every
+   round.
 
 ---
 
-## Project references
+## Tips
 
-Based on the project spec *"DQN for Task Offloading in MEC
-(Energy–Delay–Privacy)"* — Phase 2, which adds user mobility, dynamic
-uplink rate, migration cost, and the simplified privacy leakage model to
-the base Phase 1 DQN pipeline.
-
----
-
-*Made by Yousif Iskander.*
+- For a first run, pick **F1** to confirm everything works (~1 minute).
+- For writeup results, use **F2** (`fl_standard`) with `repeats=3` and
+  compare against baseline option `3` (`slow_decay`) also with `repeats=3`.
+  Multiple seeds give mean±std error bars, which look much more credible
+  than single-seed numbers.
+- All curves are also available live in TensorBoard — hit `7` while a run
+  is happening to inspect in real time.
